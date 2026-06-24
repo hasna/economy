@@ -43,6 +43,31 @@ describe('economy CLI help', () => {
     expect(stdout).toContain('cursor')
     expect(stdout).toContain('hermes')
     expect(stdout).toContain('saved_usd')
+    expect(stdout).toContain('economy todos list --verbose')
+    expect(stderr).toBe('')
+  })
+
+  test('todos list is compact by default and points to detail paths', async () => {
+    const { stdout, stderr, exitCode } = await runCli(['todos', 'list'])
+
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain('Economy Roadmap Tasks')
+    expect(stdout).toContain('showing 20 of')
+    expect(stdout).toContain('more tasks hidden')
+    expect(stdout).toContain('--verbose')
+    expect(stdout).toContain('economy todos show <task-id>')
+    expect(stdout).not.toContain('14.5')
+    expect(stderr).toBe('')
+  })
+
+  test('todos list JSON preserves the full filtered roadmap', async () => {
+    const { stdout, stderr, exitCode } = await runCli(['todos', 'list', '--json'])
+
+    expect(exitCode).toBe(0)
+    const payload = JSON.parse(stdout)
+    expect(payload.total).toBeGreaterThan(20)
+    expect(payload.phases.some((phase: { id: string }) => phase.id === 'phase-14')).toBe(true)
+    expect(stdout).toContain('14.5')
     expect(stderr).toBe('')
   })
 
@@ -64,6 +89,29 @@ describe('economy CLI help', () => {
     expect(stdout).toContain('Multi-machine auto sync')
     expect(stdout).toContain('9.7')
     expect(stdout).toContain('registerSyncSchedule')
+    expect(stderr).toBe('')
+  })
+
+  test('machine and fleet commands document compact row controls', async () => {
+    let result = await runCli(['machines', '--help'])
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('--limit <n>')
+    expect(result.stdout).toContain('--verbose')
+    expect(result.stderr).toBe('')
+
+    result = await runCli(['fleet', '--help'])
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('--limit <n>')
+    expect(result.stdout).toContain('--verbose')
+    expect(result.stdout).toContain('--json')
+    expect(result.stderr).toBe('')
+  })
+
+  test('cloud schedule status documents JSON escape hatch', async () => {
+    const { stdout, stderr, exitCode } = await runCli(['cloud', 'schedule', 'status', '--help'])
+
+    expect(exitCode).toBe(0)
+    expect(stdout).toContain('--json')
     expect(stderr).toBe('')
   })
 

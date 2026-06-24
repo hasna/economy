@@ -131,6 +131,16 @@ function parseOptionalCliAgent(value: string | undefined): Agent | undefined {
   }
 }
 
+function resolveRowLimit(value: string | undefined, verbose: boolean | undefined, fallback: number): number {
+  if (verbose && value == null) return Number.POSITIVE_INFINITY
+  return parsePositiveCliInteger(value ?? String(fallback), '--limit')
+}
+
+function printHiddenRowsHint(total: number, shown: number, detail: string): void {
+  if (total <= shown) return
+  console.log(chalk.dim(`  ... ${total - shown} more rows hidden. ${detail}`))
+}
+
 function requireCliChoice<T extends string>(value: string | undefined, option: string, allowed: readonly T[]): T {
   const selected = value ?? allowed[0]!
   if ((allowed as readonly string[]).includes(selected)) return selected as T
@@ -629,8 +639,10 @@ const ACCOUNT_PERIODS = ['today', 'week', 'month', 'year', 'all'] as const
 program
   .command('accounts [period]')
   .description('List account usage by email address and coding agent')
+  .option('--limit <n>', 'Maximum account rows to print (default: 20)')
+  .option('--verbose', 'Show all account rows')
   .option('--json', 'Output JSON')
-  .action((periodArg: string | undefined, opts: { json?: boolean }) => {
+  .action((periodArg: string | undefined, opts: { limit?: string; verbose?: boolean; json?: boolean }) => {
     const period = requireCliChoice(periodArg, 'period', ACCOUNT_PERIODS)
     const rows = queryAccountBreakdown(openDatabase(), period)
 
@@ -646,8 +658,14 @@ program
 
     console.log()
     console.log(chalk.bold.cyan(`  Accounts — ${period}`))
+    const limit = resolveRowLimit(opts.limit, opts.verbose, 20)
+    const visibleRows = rows.slice(0, limit)
+    if (visibleRows.length < rows.length) {
+      console.log(chalk.dim(`  ${rows.length} rows · showing ${visibleRows.length}`))
+    }
     console.log()
-    printAccountBreakdown(rows)
+    printAccountBreakdown(visibleRows)
+    printHiddenRowsHint(rows.length, visibleRows.length, 'Use --limit <n>, --verbose, or --json.')
     console.log()
   })
 
@@ -706,14 +724,22 @@ budgetCmd
 budgetCmd
   .command('list')
   .description('List all budgets')
-  .action(() => {
+  .option('--limit <n>', 'Maximum budget rows to print (default: 20)')
+  .option('--verbose', 'Show all budget rows')
+  .action((opts: { limit?: string; verbose?: boolean }) => {
     const db = openDatabase()
     const statuses = getBudgetStatuses(db)
     if (statuses.length === 0) { console.log(chalk.yellow('No budgets set.')); return }
+    const limit = resolveRowLimit(opts.limit, opts.verbose, 20)
+    const visibleStatuses = statuses.slice(0, limit)
     console.log()
+    if (visibleStatuses.length < statuses.length) {
+      console.log(chalk.dim(`  ${statuses.length} budgets · showing ${visibleStatuses.length}`))
+      console.log()
+    }
     printTable(
       ['Scope', 'Period', 'Limit', 'Spent', 'Used%', 'Status'],
-      statuses.map(b => {
+      visibleStatuses.map(b => {
         const pct = b.percent_used.toFixed(1)
         const status = b.is_over_limit ? chalk.red('OVER') : b.is_over_alert ? chalk.yellow('ALERT') : chalk.green('OK')
         const pctColor = b.is_over_limit ? chalk.red(pct + '%') : b.is_over_alert ? chalk.yellow(pct + '%') : chalk.green(pct + '%')
@@ -727,6 +753,7 @@ budgetCmd
         ]
       }),
     )
+    printHiddenRowsHint(statuses.length, visibleStatuses.length, 'Use --limit <n> or --verbose.')
     console.log()
   })
 
@@ -764,14 +791,22 @@ projectCmd
 projectCmd
   .command('list')
   .description('List all projects with costs')
-  .action(() => {
+  .option('--limit <n>', 'Maximum project rows to print (default: 20)')
+  .option('--verbose', 'Show all project rows')
+  .action((opts: { limit?: string; verbose?: boolean }) => {
     const db = openDatabase()
     const projects = queryProjectBreakdown(db)
     if (projects.length === 0) { console.log(chalk.yellow('No projects tracked yet.')); return }
+    const limit = resolveRowLimit(opts.limit, opts.verbose, 20)
+    const visibleProjects = projects.slice(0, limit)
     console.log()
+    if (visibleProjects.length < projects.length) {
+      console.log(chalk.dim(`  ${projects.length} projects · showing ${visibleProjects.length}`))
+      console.log()
+    }
     printTable(
       ['Project', 'Path', 'Sessions', 'Cost', 'Last Active'],
-      projects.map(p => [
+      visibleProjects.map(p => [
         chalk.white(p.project_name || chalk.dim('unknown')),
         chalk.dim(p.project_path.substring(0, 40)),
         String(p.sessions),
@@ -779,6 +814,7 @@ projectCmd
         chalk.dim(p.last_active?.substring(0, 16) ?? '—'),
       ]),
     )
+    printHiddenRowsHint(projects.length, visibleProjects.length, 'Use --limit <n>, --verbose, or economy project show <path>.')
     console.log()
   })
 
@@ -934,14 +970,22 @@ const pricingCmd = program.command('pricing').description('Manage model pricing 
 pricingCmd
   .command('list')
   .description('List all model prices')
-  .action(() => {
+  .option('--limit <n>', 'Maximum pricing rows to print (default: 50)')
+  .option('--verbose', 'Show all pricing rows')
+  .action((opts: { limit?: string; verbose?: boolean }) => {
     const db = openDatabase()
     ensurePricingSeeded(db)
     const rows = listModelPricing(db)
+    const limit = resolveRowLimit(opts.limit, opts.verbose, 50)
+    const visibleRows = rows.slice(0, limit)
     console.log()
+    if (visibleRows.length < rows.length) {
+      console.log(chalk.dim(`  ${rows.length} pricing rows · showing ${visibleRows.length}`))
+      console.log()
+    }
     printTable(
       ['Model', 'Input/1M', 'Output/1M', 'CacheR/1M', 'CacheW/1M', 'CacheStorage/1M-h', 'Out/1k'],
-      rows.map(r => [
+      visibleRows.map(r => [
         chalk.white(r.model),
         fmt(r.input_per_1m),
         fmt(r.output_per_1m),
@@ -951,6 +995,7 @@ pricingCmd
         chalk.dim(fmt(r.output_per_1m / 1000)),
       ]),
     )
+    printHiddenRowsHint(rows.length, visibleRows.length, 'Use --limit <n> or --verbose.')
     console.log()
   })
 
@@ -1092,7 +1137,10 @@ program
 program
   .command('session <id>')
   .description('Show detailed breakdown of a single session')
-  .action(async (id: string) => {
+  .option('--limit <n>', 'Number of request rows to show (default: 20)')
+  .option('--verbose', 'Show up to 50 request rows')
+  .action(async (id: string, opts: { limit?: string; verbose?: boolean }) => {
+    const requestLimit = parsePositiveCliInteger(opts.limit ?? (opts.verbose ? '50' : '20'), '--limit')
     await autoSync()
     const db = openDatabase()
     const session = db.prepare(`SELECT * FROM sessions WHERE id = ? OR id LIKE ?`).get(id, `%${id}%`) as Record<string, unknown> | null
@@ -1113,10 +1161,11 @@ program
     ])
 
     if (requests.length > 0) {
-      console.log(chalk.dim(`\n  Requests (${requests.length}):\n`))
+      const visibleRequests = requests.slice(0, requestLimit)
+      console.log(chalk.dim(`\n  Requests (${visibleRequests.length}${visibleRequests.length < requests.length ? ` of ${requests.length}` : ''}):\n`))
       printTable(
         ['Time', 'Model', 'Input', 'Output', 'Cache R', 'Cache W', 'Cost'],
-        requests.slice(0, 50).map(r => [
+        visibleRequests.map(r => [
           chalk.dim(String(r['timestamp']).substring(11, 19)),
           chalk.white(String(r['model']).substring(0, 22)),
           fmtTokens(r['input_tokens'] as number),
@@ -1126,7 +1175,9 @@ program
           fmt(r['cost_usd'] as number),
         ]),
       )
-      if (requests.length > 50) console.log(chalk.dim(`  ... and ${requests.length - 50} more requests`))
+      if (requests.length > visibleRequests.length) {
+        console.log(chalk.dim(`  ... ${requests.length - visibleRequests.length} more requests hidden. Use --limit <n> or --verbose.`))
+      }
     }
     console.log()
   })
@@ -1136,7 +1187,9 @@ program
 program
   .command('machines')
   .description('List all machines that have synced data')
-  .action(async () => {
+  .option('--limit <n>', 'Maximum machine rows to print (default: 20)')
+  .option('--verbose', 'Show all machine rows')
+  .action(async (opts: { limit?: string; verbose?: boolean }) => {
     await autoSync()
     const db = openDatabase()
     const machines = listMachines(db)
@@ -1145,12 +1198,17 @@ program
       console.log(chalk.yellow(`No machine data yet. Current machine: ${current}`))
       return
     }
+    const limit = resolveRowLimit(opts.limit, opts.verbose, 20)
+    const visibleMachines = machines.slice(0, limit)
     console.log()
     console.log(chalk.bold.cyan('  Machines'))
+    if (visibleMachines.length < machines.length) {
+      console.log(chalk.dim(`  ${machines.length} machines · showing ${visibleMachines.length}`))
+    }
     console.log()
     printTable(
       ['Machine', 'Sessions', 'Requests', 'Cost', 'Last Active'],
-      machines.map(m => [
+      visibleMachines.map(m => [
         m.machine_id === current ? chalk.green(`${m.machine_id} (this)`) : chalk.white(m.machine_id),
         fmtCount(m.sessions),
         fmtCount(m.requests),
@@ -1158,6 +1216,7 @@ program
         chalk.dim(m.last_active?.substring(0, 16) ?? '—'),
       ]),
     )
+    printHiddenRowsHint(machines.length, visibleMachines.length, 'Use --limit <n> or --verbose.')
     console.log(`\n  ${chalk.dim('Current machine:')} ${chalk.bold(current)}`)
     console.log()
   })
@@ -1452,14 +1511,22 @@ goalCmd
 goalCmd
   .command('list')
   .description('List all goals with progress')
-  .action(() => {
+  .option('--limit <n>', 'Maximum goal rows to print (default: 20)')
+  .option('--verbose', 'Show all goal rows')
+  .action((opts: { limit?: string; verbose?: boolean }) => {
     const db = openDatabase()
     const statuses = getGoalStatuses(db)
     if (statuses.length === 0) { console.log(chalk.yellow('No goals set.')); return }
+    const limit = resolveRowLimit(opts.limit, opts.verbose, 20)
+    const visibleStatuses = statuses.slice(0, limit)
     console.log()
+    if (visibleStatuses.length < statuses.length) {
+      console.log(chalk.dim(`  ${statuses.length} goals · showing ${visibleStatuses.length}`))
+      console.log()
+    }
     printTable(
       ['Period', 'Scope', 'Limit', 'Spent', 'Used%', 'Status'],
-      statuses.map(g => {
+      visibleStatuses.map(g => {
         const pct = g.percent_used.toFixed(1)
         const scope = g.project_path ?? g.agent ?? 'global'
         const status = g.is_over ? chalk.red('OVER') : g.is_at_risk ? chalk.yellow('AT RISK') : chalk.green('ON TRACK')
@@ -1474,6 +1541,7 @@ goalCmd
         ]
       }),
     )
+    printHiddenRowsHint(statuses.length, visibleStatuses.length, 'Use --limit <n> or --verbose.')
     console.log()
   })
 
@@ -1489,12 +1557,16 @@ goalCmd
 goalCmd
   .command('status')
   .description('Quick goal progress summary')
-  .action(() => {
+  .option('--limit <n>', 'Maximum goal rows to print (default: 20)')
+  .option('--verbose', 'Show all goal rows')
+  .action((opts: { limit?: string; verbose?: boolean }) => {
     const db = openDatabase()
     const statuses = getGoalStatuses(db)
     if (statuses.length === 0) { console.log(chalk.yellow('No goals set.')); return }
+    const limit = resolveRowLimit(opts.limit, opts.verbose, 20)
+    const visibleStatuses = statuses.slice(0, limit)
     console.log()
-    for (const g of statuses) {
+    for (const g of visibleStatuses) {
       const scope = g.project_path ?? g.agent ?? 'global'
       const pct = Math.min(g.percent_used, 100)
       const barFilled = Math.round(pct / 10)
@@ -1508,6 +1580,7 @@ goalCmd
       const label = `${g.period} (${scope})`.padEnd(20)
       console.log(`  ${label}  ${bar}  ${fmt(g.current_spend_usd)} / ${fmt(g.limit_usd)}  (${g.percent_used.toFixed(0)}%)  ${statusStr}`)
     }
+    printHiddenRowsHint(statuses.length, visibleStatuses.length, 'Use --limit <n> or --verbose.')
     console.log()
   })
 
