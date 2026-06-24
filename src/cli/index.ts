@@ -447,11 +447,16 @@ program
   .description('Cost breakdown by model, agent, project, or account')
   .option('--by <dimension>', 'Dimension: model|agent|project|account', 'model')
   .option('--since <date>', 'Filter since date or relative (e.g. 2026-03-01, 7d, 30d)')
-  .action((opts: { by?: string; since?: string }) => {
+  .option('--limit <n>', 'Maximum breakdown rows to print (default: 20)')
+  .option('--verbose', 'Show all breakdown rows')
+  .option('--json', 'Output JSON')
+  .action((opts: { by?: string; since?: string; limit?: string; verbose?: boolean; json?: boolean }) => {
     const db = openDatabase()
+    const by = requireCliChoice(opts.by, '--by', ['model', 'agent', 'project', 'account'] as const)
     const sinceDate = opts.since ? parseSinceDate(opts.since) : undefined
+    const limit = resolveRowLimit(opts.limit, opts.verbose, 20)
     console.log()
-    if (opts.by === 'project') {
+    if (by === 'project') {
       const rows = sinceDate
         ? db.prepare(`
           SELECT project_path, project_name,
@@ -464,9 +469,14 @@ program
           GROUP BY project_path ORDER BY cost_usd DESC
         `).all(sinceDate) as Array<{ project_path: string; project_name: string; sessions: number; total_tokens: number; requests: number; cost_usd: number; last_active: string }>
         : queryProjectBreakdown(db)
+      if (opts.json) {
+        console.log(JSON.stringify({ by, since: sinceDate ?? null, total: rows.length, rows }, null, 2))
+        return
+      }
+      const visibleRows = rows.slice(0, limit)
       printTable(
         ['Project', 'Sessions', 'Requests', 'Tokens', 'Cost'],
-        rows.map(r => [
+        visibleRows.map(r => [
           chalk.white(r.project_name || chalk.dim('unknown')),
           String(r.sessions),
           String(r.requests),
@@ -474,7 +484,8 @@ program
           fmt(r.cost_usd),
         ]),
       )
-    } else if (opts.by === 'agent') {
+      printHiddenRowsHint(rows.length, visibleRows.length, 'Use --limit <n>, --verbose, or --json.')
+    } else if (by === 'agent') {
       const rows = sinceDate
         ? db.prepare(`
           SELECT agent,
@@ -491,9 +502,14 @@ program
           ORDER BY api_equivalent_usd DESC
         `).all(sinceDate) as Array<{ agent: string; sessions: number; requests: number; total_tokens: number; api_equivalent_usd: number; billable_usd: number; subscription_included_usd: number }>
         : queryAgentBreakdown(db)
+      if (opts.json) {
+        console.log(JSON.stringify({ by, since: sinceDate ?? null, total: rows.length, rows }, null, 2))
+        return
+      }
+      const visibleRows = rows.slice(0, limit)
       printTable(
         ['Agent', 'Sessions', 'Requests', 'Tokens', 'API Eq', 'Billable', 'Included'],
-        rows.map(r => [
+        visibleRows.map(r => [
           fmtAgent(r.agent),
           String(r.sessions),
           String(r.requests),
@@ -503,7 +519,8 @@ program
           fmt(r.subscription_included_usd),
         ]),
       )
-    } else if (opts.by === 'account') {
+      printHiddenRowsHint(rows.length, visibleRows.length, 'Use --limit <n>, --verbose, or --json.')
+    } else if (by === 'account') {
       const rows = sinceDate
         ? db.prepare(`
           WITH request_rows AS (
@@ -606,7 +623,13 @@ program
           ORDER BY api_equivalent_usd DESC
         `).all(sinceDate, sinceDate) as AccountBreakdown[]
         : queryAccountBreakdown(db)
-      printAccountBreakdown(rows)
+      if (opts.json) {
+        console.log(JSON.stringify({ by, since: sinceDate ?? null, total: rows.length, rows }, null, 2))
+        return
+      }
+      const visibleRows = rows.slice(0, limit)
+      printAccountBreakdown(visibleRows)
+      printHiddenRowsHint(rows.length, visibleRows.length, 'Use --limit <n>, --verbose, or --json.')
     } else {
       const rows = sinceDate
         ? db.prepare(`
@@ -620,9 +643,14 @@ program
           GROUP BY model, agent ORDER BY cost_usd DESC
         `).all(sinceDate) as Array<{ model: string; agent: string; requests: number; total_tokens: number; cost_usd: number }>
         : queryModelBreakdown(db)
+      if (opts.json) {
+        console.log(JSON.stringify({ by, since: sinceDate ?? null, total: rows.length, rows }, null, 2))
+        return
+      }
+      const visibleRows = rows.slice(0, limit)
       printTable(
         ['Model', 'Agent', 'Requests', 'Tokens', 'Cost'],
-        rows.map(r => [
+        visibleRows.map(r => [
           chalk.white(r.model),
           fmtAgent(r.agent),
           String(r.requests),
@@ -630,6 +658,7 @@ program
           fmt(r.cost_usd),
         ]),
       )
+      printHiddenRowsHint(rows.length, visibleRows.length, 'Use --limit <n>, --verbose, or --json.')
     }
     console.log()
   })

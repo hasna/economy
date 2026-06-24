@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { openDatabase, upsertRequest, upsertSession } from '../db/database.js'
 
 const root = new URL('../../', import.meta.url).pathname.replace(/\/$/, '')
 const tempRoots: string[] = []
@@ -23,6 +24,49 @@ async function runCli(
   const stderr = await new Response(proc.stderr).text()
   const exitCode = await proc.exited
   return { stdout, stderr, exitCode }
+}
+
+function seedBreakdownRows(dbPath: string): void {
+  const db = openDatabase(dbPath)
+  const timestamp = '2026-06-24T12:00:00.000Z'
+  for (let i = 0; i < 25; i++) {
+    upsertSession(db, {
+      id: `breakdown-session-${i}`,
+      agent: 'codex',
+      project_path: `/tmp/breakdown-project-${i}`,
+      project_name: `breakdown-project-${i}`,
+      started_at: timestamp,
+      ended_at: null,
+      total_cost_usd: i + 1,
+      total_tokens: 1000 + i,
+      request_count: 1,
+      account_key: `codex:breakdown-account-${i}`,
+      account_tool: 'codex',
+      account_name: `breakdown-account-${i}`,
+      account_email: `breakdown-account-${i}@example.test`,
+      account_source: 'test',
+    })
+    upsertRequest(db, {
+      id: `breakdown-request-${i}`,
+      agent: 'codex',
+      session_id: `breakdown-session-${i}`,
+      model: `breakdown-model-${i}`,
+      input_tokens: 100 + i,
+      output_tokens: 20 + i,
+      cache_read_tokens: 0,
+      cache_create_tokens: 0,
+      cost_usd: i + 1,
+      cost_basis: 'metered_api',
+      duration_ms: 10,
+      timestamp,
+      source_request_id: `breakdown-source-${i}`,
+      account_key: `codex:breakdown-account-${i}`,
+      account_tool: 'codex',
+      account_name: `breakdown-account-${i}`,
+      account_email: `breakdown-account-${i}@example.test`,
+      account_source: 'test',
+    })
+  }
 }
 
 afterEach(() => {
@@ -105,6 +149,41 @@ describe('economy CLI help', () => {
     expect(result.stdout).toContain('--verbose')
     expect(result.stdout).toContain('--json')
     expect(result.stderr).toBe('')
+  })
+
+  test('breakdown documents compact row controls', async () => {
+    const result = await runCli(['breakdown', '--help'])
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('--limit <n>')
+    expect(result.stdout).toContain('--verbose')
+    expect(result.stdout).toContain('--json')
+    expect(result.stderr).toBe('')
+  })
+
+  test('breakdown caps high-cardinality human output and keeps JSON complete', async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), 'economy-breakdown-test-'))
+    tempRoots.push(tempRoot)
+    const dbPath = join(tempRoot, 'economy.db')
+    seedBreakdownRows(dbPath)
+    const env = { HASNA_ECONOMY_DB_PATH: dbPath }
+
+    for (const by of ['model', 'project', 'account']) {
+      const result = await runCli(['breakdown', '--by', by], env)
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain('more rows hidden')
+      expect(result.stdout).toContain('--verbose')
+      expect(result.stdout).toContain('--json')
+      expect(result.stderr).toBe('')
+    }
+
+    const jsonResult = await runCli(['breakdown', '--by', 'model', '--json'], env)
+    expect(jsonResult.exitCode).toBe(0)
+    const payload = JSON.parse(jsonResult.stdout)
+    expect(payload.by).toBe('model')
+    expect(payload.total).toBe(25)
+    expect(payload.rows).toHaveLength(25)
+    expect(jsonResult.stderr).toBe('')
   })
 
   test('cloud schedule status documents JSON escape hatch', async () => {
