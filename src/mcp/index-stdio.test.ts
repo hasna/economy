@@ -52,7 +52,7 @@ describe('economy-mcp stdio server', () => {
       expect(summary.content[0]?.type === 'text' ? summary.content[0].text : '').toContain('period: today')
 
       const pricing = await client.callTool(
-        { name: 'get_pricing', arguments: {} },
+        { name: 'get_pricing', arguments: { limit: 100 } },
         undefined,
         { timeout: 5_000 },
       )
@@ -99,7 +99,53 @@ describe('economy-mcp stdio server', () => {
         { timeout: 5_000 },
       )
       const subscriptionSetText = subscriptionSet.content[0]?.type === 'text' ? subscriptionSet.content[0].text : ''
-      expect(subscriptionSetText).toContain('"id": "sub-stdio"')
+      expect(subscriptionSetText).toContain('Subscription set: sub-stdio')
+      expect(subscriptionSetText).toContain('provider: cursor')
+      expect(subscriptionSetText).not.toContain('"id"')
+
+      const subscriptionSetJson = await client.callTool(
+        {
+          name: 'set_subscription',
+          arguments: {
+            id: 'sub-stdio',
+            provider: 'cursor',
+            plan: 'pro',
+            agent: 'cursor',
+            monthly_fee_usd: 20,
+            included_usage_usd: 20,
+            json: true,
+          },
+        },
+        undefined,
+        { timeout: 5_000 },
+      )
+      const subscriptionSetJsonText = subscriptionSetJson.content[0]?.type === 'text' ? subscriptionSetJson.content[0].text : ''
+      expect(JSON.parse(subscriptionSetJsonText)).toMatchObject({ id: 'sub-stdio', provider: 'cursor', plan: 'pro' })
+
+      const savings = await client.callTool(
+        { name: 'get_savings', arguments: { period: 'month' } },
+        undefined,
+        { timeout: 5_000 },
+      )
+      const savingsText = savings.content[0]?.type === 'text' ? savings.content[0].text : ''
+      expect(savingsText).toContain('api_equivalent:')
+      expect(savingsText).not.toContain('"by_agent"')
+
+      const savingsJson = await client.callTool(
+        { name: 'get_savings', arguments: { period: 'month', json: true } },
+        undefined,
+        { timeout: 5_000 },
+      )
+      const savingsJsonText = savingsJson.content[0]?.type === 'text' ? savingsJson.content[0].text : ''
+      expect(JSON.parse(savingsJsonText)).toMatchObject({ period: 'month' })
+
+      const usageJson = await client.callTool(
+        { name: 'get_usage', arguments: { period: 'month', json: true } },
+        undefined,
+        { timeout: 5_000 },
+      )
+      const usageJsonText = usageJson.content[0]?.type === 'text' ? usageJson.content[0].text : ''
+      expect(JSON.parse(usageJsonText)).toHaveProperty('summary')
 
       const subscriptions = await client.callTool(
         { name: 'list_subscriptions', arguments: {} },
@@ -130,33 +176,65 @@ describe('economy-mcp stdio server', () => {
         { timeout: 5_000 },
       )
       const customPricing = await client.callTool(
-        { name: 'get_pricing', arguments: {} },
+        { name: 'get_pricing', arguments: { limit: 100 } },
         undefined,
         { timeout: 5_000 },
       )
       const customPricingText = customPricing.content[0]?.type === 'text' ? customPricing.content[0].text : ''
       expect(customPricingText).toContain('custom-model')
       expect(customPricingText).toContain('$4.50')
+
+      const defaultPricing = await client.callTool(
+        { name: 'get_pricing', arguments: {} },
+        undefined,
+        { timeout: 5_000 },
+      )
+      const defaultPricingText = defaultPricing.content[0]?.type === 'text' ? defaultPricing.content[0].text : ''
+      expect(defaultPricingText).toContain('more pricing rows hidden')
+
       await client.callTool(
         { name: 'remove_pricing', arguments: { model: 'custom-model' } },
         undefined,
         { timeout: 5_000 },
       )
 
+      const registered = await client.callTool(
+        { name: 'register_agent', arguments: { name: 'stdio-reviewer', json: true } },
+        undefined,
+        { timeout: 5_000 },
+      )
+      const registeredText = registered.content[0]?.type === 'text' ? registered.content[0].text : ''
+      expect(JSON.parse(registeredText)).toMatchObject({ name: 'stdio-reviewer' })
+
+      const agentsJson = await client.callTool(
+        { name: 'list_agents', arguments: { json: true } },
+        undefined,
+        { timeout: 5_000 },
+      )
+      const agentsJsonText = agentsJson.content[0]?.type === 'text' ? agentsJson.content[0].text : ''
+      expect(JSON.parse(agentsJsonText).some((agent: { name: string }) => agent.name === 'stdio-reviewer')).toBe(true)
+
       const description = await client.callTool(
-        { name: 'describe_tools', arguments: { names: ['sync', 'get_sessions', 'get_billing_summary', 'get_pricing', 'set_budget', 'set_pricing', 'list_subscriptions', 'set_subscription'] } },
+        { name: 'describe_tools', arguments: { names: ['sync', 'get_sessions', 'get_billing_summary', 'get_pricing', 'get_usage', 'get_savings', 'get_session_detail', 'set_budget', 'set_pricing', 'list_subscriptions', 'set_subscription', 'register_agent', 'list_agents'] } },
         undefined,
         { timeout: 5_000 },
       )
       const text = description.content[0]?.type === 'text' ? description.content[0].text : ''
-      expect(text).toContain('sync: sources(all|claude|takumi|codex|gemini|opencode|cursor|pi|hermes)')
+      expect(text).toContain('sync: sources(all|claude|takumi|codex|gemini|opencode|cursor|pi|hermes), json?')
       expect(text).toContain('get_sessions: agent(claude|takumi|codex|gemini|opencode|cursor|pi|hermes), project(partial), account?(key/name/email)')
       expect(text).toContain('get_billing_summary: period(today|yesterday|week|month|year|all)')
-      expect(text).toContain('get_pricing: no params -> model pricing rows')
+      expect(text).toContain('get_pricing: limit(20), verbose?, json?')
+      expect(text).toContain('get_usage: period(today|week|month|year|all)')
+      expect(text).toContain('limit(20), json? -> usage snapshots')
+      expect(text).toContain('get_savings: period(today|week|month|year|all)')
+      expect(text).toContain('get_session_detail: session_id(prefix ok), limit(20), verbose?')
       expect(text).toContain('set_budget: period(daily|weekly|monthly)')
       expect(text).toContain('set_pricing: model, input_per_1m')
       expect(text).toContain('list_subscriptions: no params')
       expect(text).toContain('set_subscription: provider, plan')
+      expect(text).toContain('json? -> create/update subscription plan')
+      expect(text).toContain('register_agent: name, session_id?, json?')
+      expect(text).toContain('list_agents: json?')
     } finally {
       await client.close()
     }

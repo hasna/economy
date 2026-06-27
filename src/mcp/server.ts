@@ -71,40 +71,55 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
   get_cost_summary: 'period(today|week|month|year|all), machine?(hostname) -> {total_usd, sessions, requests, tokens, summary}',
   get_sessions: `agent(${AGENTS.join('|')}), project(partial), account?(key/name/email), machine?(hostname), limit(20) -> compact session table`,
   get_top_sessions: `n(10), agent(${AGENTS.join('|')}) -> top sessions by cost`,
-  list_machines: 'no params -> machine_id, sessions, requests, cost, last_active',
-  get_model_breakdown: 'no params -> model, requests, tokens, cost',
-  get_project_breakdown: 'period?(today|week|month|year|all) -> project_name, sessions, tokens, cost',
+  list_machines: 'limit(20), verbose?, json? -> machine_id, sessions, requests, cost, last_active',
+  get_model_breakdown: 'limit(20), verbose?, json? -> model, requests, tokens, cost',
+  get_project_breakdown: 'period?(today|week|month|year|all), limit(20), verbose?, json? -> project_name, sessions, tokens, cost',
   get_agent_breakdown: 'period?(today|week|month|year|all) -> agent, sessions, requests, tokens, api-equivalent, billable, included',
-  get_account_breakdown: 'period?(today|week|month|year|all) -> account profile, sessions, requests, tokens, api-equivalent, billable, included',
-  get_budget_status: 'no params -> budget limits, current spend, percent_used, is_over_alert',
+  get_account_breakdown: 'period?(today|week|month|year|all), limit(20), verbose?, json? -> account profile, sessions, requests, tokens, api-equivalent, billable, included',
+  get_budget_status: 'limit(20), verbose?, json? -> budget limits, current spend, percent_used, is_over_alert',
   set_budget: 'period(daily|weekly|monthly), limit_usd, project_path?, agent?, alert_at_percent? -> create budget',
   remove_budget: 'id -> delete budget',
-  get_pricing: 'no params -> model pricing rows with input, output, cache read/write, and cache storage rates',
+  get_pricing: 'limit(20), verbose?, json? -> model pricing rows with input, output, cache read/write, and cache storage rates',
   set_pricing: 'model, input_per_1m, output_per_1m, cache_read_per_1m?, cache_write_per_1m?, cache_write_1h_per_1m?, cache_storage_per_1m_hour? -> create/update pricing',
   remove_pricing: 'model -> delete pricing row',
   get_daily: 'days(30) -> daily cost table grouped by date and agent',
   get_billing_summary: 'period(today|yesterday|week|month|year|all) -> actual provider billing totals',
-  get_session_detail: 'session_id(prefix ok) -> per-request breakdown with model, tokens, cost',
-  get_usage: `period(today|week|month|year|all), agent?(${AGENTS.join('|')}) -> usage snapshots and all-machine summary`,
-  get_savings: `period(today|week|month|year|all), agent?(${AGENTS.join('|')}) -> subscription/API-equivalent savings`,
+  get_session_detail: 'session_id(prefix ok), limit(20), verbose? -> per-request breakdown with model, tokens, cost',
+  get_usage: `period(today|week|month|year|all), agent?(${AGENTS.join('|')}), limit(20), json? -> usage snapshots and all-machine summary`,
+  get_savings: `period(today|week|month|year|all), agent?(${AGENTS.join('|')}), limit(20), json? -> subscription/API-equivalent savings`,
   list_subscriptions: 'no params -> configured subscription plans and included usage',
-  set_subscription: `provider, plan, monthly_fee_usd?, included_usage_usd?, agent?(${AGENTS.join('|')}) -> create/update subscription plan`,
+  set_subscription: `provider, plan, monthly_fee_usd?, included_usage_usd?, agent?(${AGENTS.join('|')}), json? -> create/update subscription plan`,
   remove_subscription: 'id -> delete subscription plan',
-  sync: `sources(all|${AGENTS.join('|')}) -> ingest latest cost data`,
+  sync: `sources(all|${AGENTS.join('|')}), json? -> ingest latest cost data`,
   search_tools: 'query substring -> tool name list',
   describe_tools: 'names[] -> one-line parameter hints',
-  get_goals: 'no params -> goal progress summary',
+  get_goals: 'limit(20), verbose?, json? -> goal progress summary',
   set_goal: 'period(day|week|month|year), limit_usd, project_path?, agent? -> create goal',
   remove_goal: 'id -> delete goal',
-  register_agent: 'name, session_id? -> register agent session',
+  register_agent: 'name, session_id?, json? -> register agent session',
   heartbeat: 'agent_id -> update last_seen_at',
   set_focus: 'agent_id, project_id? -> set active project context',
-  list_agents: 'no params -> registered agent list',
+  list_agents: 'json? -> registered agent list',
   send_feedback: 'message, email?, category? -> save feedback locally',
 }
 
 const fmtUsd = (n: number) => '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const fmtTok = (n: number) => n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n)
+const DEFAULT_MCP_ROW_LIMIT = 20
+
+function clampLimit(limit: number | undefined, fallback = DEFAULT_MCP_ROW_LIMIT, max = 100): number {
+  if (limit == null) return fallback
+  if (!Number.isFinite(limit)) return fallback
+  return Math.max(1, Math.min(max, Math.floor(limit)))
+}
+
+function rowLimit(limit: number | undefined, verbose?: boolean): number {
+  return verbose ? Number.POSITIVE_INFINITY : clampLimit(limit)
+}
+
+function hiddenRowsHint(total: number, shown: number, noun: string): string | undefined {
+  return total > shown ? `... ${total - shown} more ${noun} hidden; call with limit, verbose=true, or json=true.` : undefined
+}
 
 function fmtSession(s: Record<string, unknown>): string {
   const id = String(s['id'] ?? '').slice(0, 8)
@@ -113,6 +128,34 @@ function fmtSession(s: Record<string, unknown>): string {
   const cost = fmtUsd(Number(s['total_cost_usd'] ?? 0))
   const tok = fmtTok(Number(s['total_tokens'] ?? 0))
   return `${id} ${agent.padEnd(6)} ${cost.padEnd(10)} ${tok.padEnd(8)} ${proj}`
+}
+
+function compactPrimitive(value: unknown): string {
+  if (value == null) return 'none'
+  if (typeof value === 'number') return Number.isFinite(value) ? value.toLocaleString('en-US') : String(value)
+  if (typeof value === 'boolean') return value ? 'yes' : 'no'
+  return String(value)
+}
+
+function compactObject(value: unknown): string {
+  if (value == null) return 'none'
+  if (Array.isArray(value)) return `${value.length} rows`
+  if (typeof value !== 'object') return compactPrimitive(value)
+  const entries = Object.entries(value as Record<string, unknown>)
+  const primitives = entries
+    .filter(([, entry]) => entry == null || ['string', 'number', 'boolean'].includes(typeof entry))
+    .slice(0, 6)
+    .map(([key, entry]) => `${key}=${compactPrimitive(entry)}`)
+  return primitives.length ? primitives.join(', ') : `${entries.length} fields`
+}
+
+function fmtAgentRegistration(agent: { id: string; name: string; last_seen_at: string; project_id?: string }): string {
+  return [
+    `id: ${agent.id}`,
+    `name: ${agent.name}`,
+    `last_seen_at: ${agent.last_seen_at}`,
+    agent.project_id ? `project_id: ${agent.project_id}` : undefined,
+  ].filter(Boolean).join('\n')
 }
 
 function text(text: string) {
@@ -204,29 +247,37 @@ server.tool(
 
 server.tool(
   'get_model_breakdown',
-  'Cost per model. No params.',
-  {},
-  async () => {
+  'Cost per model. Params: limit(20), verbose, json.',
+  { limit: z.number().int().positive().max(100).optional(), verbose: z.boolean().optional(), json: z.boolean().optional() },
+  async ({ limit, verbose, json }: { limit?: number; verbose?: boolean; json?: boolean }) => {
     const rows = queryModelBreakdown(db) as unknown as Array<Record<string, unknown>>
+    if (json) return text(JSON.stringify(rows, null, 2))
+    const visibleRows = rows.slice(0, rowLimit(limit, verbose))
     const lines = ['model                          agent     reqs    tokens   cost']
-    for (const row of rows) {
+    for (const row of visibleRows) {
       lines.push(`${String(row['model']).slice(0, 30).padEnd(31)}${String(row['agent']).padEnd(10)}${String(row['requests']).padEnd(8)}${fmtTok(Number(row['total_tokens'])).padEnd(9)}${fmtUsd(Number(row['cost_usd']))}`)
     }
+    const hint = hiddenRowsHint(rows.length, visibleRows.length, 'models')
+    if (hint) lines.push(hint)
     return text(lines.join('\n'))
   },
 )
 
 server.tool(
   'get_project_breakdown',
-  'Cost per project. Params: period(today|week|month|year|all).',
-  { period: z.enum(['today', 'week', 'month', 'year', 'all']).optional() },
-  async ({ period }: { period?: Exclude<Period, 'yesterday'> }) => {
+  'Cost per project. Params: period(today|week|month|year|all), limit(20), verbose, json.',
+  { period: z.enum(['today', 'week', 'month', 'year', 'all']).optional(), limit: z.number().int().positive().max(100).optional(), verbose: z.boolean().optional(), json: z.boolean().optional() },
+  async ({ period, limit, verbose, json }: { period?: Exclude<Period, 'yesterday'>; limit?: number; verbose?: boolean; json?: boolean }) => {
     const rows = queryProjectBreakdown(db, period ?? 'all') as unknown as Array<Record<string, unknown>>
+    if (json) return text(JSON.stringify(rows, null, 2))
+    const visibleRows = rows.slice(0, rowLimit(limit, verbose))
     const lines = ['project              sessions tokens   cost']
-    for (const row of rows) {
+    for (const row of visibleRows) {
       const name = String(row['project_name'] || row['project_path'] || '—').slice(0, 20)
       lines.push(`${name.padEnd(21)}${String(row['sessions']).padEnd(9)}${fmtTok(Number(row['total_tokens'])).padEnd(9)}${fmtUsd(Number(row['cost_usd']))}`)
     }
+    const hint = hiddenRowsHint(rows.length, visibleRows.length, 'projects')
+    if (hint) lines.push(hint)
     return text(lines.join('\n'))
   },
 )
@@ -256,13 +307,15 @@ server.tool(
 
 server.tool(
   'get_account_breakdown',
-  'Cost per account/profile. Params: period(today|week|month|year|all). Shows API-equivalent, billable API, and subscription-included usage.',
-  { period: z.enum(['today', 'week', 'month', 'year', 'all']).optional() },
-  async ({ period }: { period?: Exclude<Period, 'yesterday'> }) => {
+  'Cost per account/profile. Params: period(today|week|month|year|all), limit(20), verbose, json. Shows API-equivalent, billable API, and subscription-included usage.',
+  { period: z.enum(['today', 'week', 'month', 'year', 'all']).optional(), limit: z.number().int().positive().max(100).optional(), verbose: z.boolean().optional(), json: z.boolean().optional() },
+  async ({ period, limit, verbose, json }: { period?: Exclude<Period, 'yesterday'>; limit?: number; verbose?: boolean; json?: boolean }) => {
     const rows = queryAccountBreakdown(db, period ?? 'all') as unknown as Array<Record<string, unknown>>
+    if (json) return text(JSON.stringify(rows, null, 2))
     if (rows.length === 0) return text('No account-attributed sessions yet.')
+    const visibleRows = rows.slice(0, rowLimit(limit, verbose))
     const lines = ['account              agent      sessions requests tokens   api_eq    billable  included']
-    for (const row of rows) {
+    for (const row of visibleRows) {
       const label = String(row['account_email'] || row['account_name'] || row['account_key'] || '—').slice(0, 20)
       lines.push(
         `${label.padEnd(21)}` +
@@ -275,25 +328,31 @@ server.tool(
         `${fmtUsd(Number(row['subscription_included_usd'] ?? 0))}`,
       )
     }
+    const hint = hiddenRowsHint(rows.length, visibleRows.length, 'accounts')
+    if (hint) lines.push(hint)
     return text(lines.join('\n'))
   },
 )
 
 server.tool(
   'get_budget_status',
-  'Budget limits vs spend, percent used, alert flags. No params.',
-  {},
-  async () => {
+  'Budget limits vs spend, percent used, alert flags. Params: limit(20), verbose, json.',
+  { limit: z.number().int().positive().max(100).optional(), verbose: z.boolean().optional(), json: z.boolean().optional() },
+  async ({ limit, verbose, json }: { limit?: number; verbose?: boolean; json?: boolean }) => {
     const budgets = getBudgetStatuses(db) as unknown as Array<Record<string, unknown>>
+    if (json) return text(JSON.stringify(budgets, null, 2))
     if (budgets.length === 0) return text('No budgets set.')
+    const visibleBudgets = budgets.slice(0, rowLimit(limit, verbose))
 
     const lines = ['scope                period   spent      limit      used%  status']
-    for (const budget of budgets) {
+    for (const budget of visibleBudgets) {
       const scope = String(budget['project_path'] ?? 'global').slice(0, 20)
       const pct = Number(budget['percent_used']).toFixed(1)
       const status = budget['is_over_limit'] ? 'OVER' : budget['is_over_alert'] ? 'ALERT' : 'OK'
       lines.push(`${scope.padEnd(21)}${String(budget['period']).padEnd(9)}${fmtUsd(Number(budget['current_spend_usd'])).padEnd(11)}${fmtUsd(Number(budget['limit_usd'])).padEnd(11)}${pct}%`.padEnd(49) + `  ${status}`)
     }
+    const hint = hiddenRowsHint(budgets.length, visibleBudgets.length, 'budgets')
+    if (hint) lines.push(hint)
     return text(lines.join('\n'))
   },
 )
@@ -337,12 +396,14 @@ server.tool(
 
 server.tool(
   'get_pricing',
-  'Editable model pricing rows. Includes input/output/cache rates and context-cache storage.',
-  {},
-  async () => {
+  'Editable model pricing rows. Includes input/output/cache rates and context-cache storage. Params: limit(20), verbose, json.',
+  { limit: z.number().int().positive().max(100).optional(), verbose: z.boolean().optional(), json: z.boolean().optional() },
+  async ({ limit, verbose, json }: { limit?: number; verbose?: boolean; json?: boolean }) => {
     const rows = listModelPricing(db)
+    if (json) return text(JSON.stringify(rows, null, 2))
+    const visibleRows = rows.slice(0, rowLimit(limit, verbose))
     const lines = ['model                          input    output   cache-r  cache-w  cache-1h storage-h']
-    for (const row of rows) {
+    for (const row of visibleRows) {
       lines.push(
         `${row.model.slice(0, 30).padEnd(31)}` +
         `${fmtUsd(row.input_per_1m).padEnd(9)}` +
@@ -353,6 +414,8 @@ server.tool(
         `${fmtUsd(row.cache_storage_per_1m_hour ?? 0)}`,
       )
     }
+    const hint = hiddenRowsHint(rows.length, visibleRows.length, 'pricing rows')
+    if (hint) lines.push(hint)
     return text(lines.join('\n'))
   },
 )
@@ -440,13 +503,15 @@ server.tool(
 
 server.tool(
   'get_session_detail',
-  'Per-request breakdown of a single session. Params: session_id (prefix ok)',
-  { session_id: z.string() },
-  async ({ session_id }: { session_id: string }) => {
+  'Per-request breakdown of a single session. Params: session_id (prefix ok), limit(20), verbose.',
+  { session_id: z.string(), limit: z.number().int().positive().max(100).optional(), verbose: z.boolean().optional() },
+  async ({ session_id, limit, verbose }: { session_id: string; limit?: number; verbose?: boolean }) => {
     const session = db.prepare(`SELECT * FROM sessions WHERE id = ? OR id LIKE ?`).get(session_id, `${session_id}%`) as Record<string, unknown> | null
     if (!session) return textError(`Session not found: ${session_id}`)
 
-    const requests = db.prepare(`SELECT * FROM requests WHERE session_id = ? ORDER BY timestamp ASC LIMIT 50`).all(session['id'] as string) as Array<Record<string, unknown>>
+    const requestLimit = clampLimit(limit, verbose ? 50 : DEFAULT_MCP_ROW_LIMIT)
+    const requestCount = db.prepare(`SELECT COUNT(*) as count FROM requests WHERE session_id = ?`).get(session['id'] as string) as { count: number }
+    const requests = db.prepare(`SELECT * FROM requests WHERE session_id = ? ORDER BY timestamp ASC LIMIT ?`).all(session['id'] as string, requestLimit) as Array<Record<string, unknown>>
     const lines = [
       `session: ${String(session['id']).slice(0, 16)}`,
       `agent: ${session['agent']}  project: ${session['project_name'] || '—'}`,
@@ -467,40 +532,103 @@ server.tool(
         `${fmtUsd(Number(request['cost_usd']))}`,
       )
     }
+    if (requestCount.count > requests.length) {
+      lines.push(`... ${requestCount.count - requests.length} more requests hidden; call with limit or verbose=true for more.`)
+    }
     return text(lines.join('\n'))
   },
 )
 
 server.tool(
   'sync',
-  `Ingest new cost data. sources: all|${AGENTS.join('|')}`,
-  { sources: z.enum(['all', ...AGENTS] as [string, ...string[]]).optional() },
-  async ({ sources }: { sources?: typeof AGENTS[number] | 'all' }) => {
+  `Ingest new cost data. sources: all|${AGENTS.join('|')}. Set json=true for the full result object.`,
+  { sources: z.enum(['all', ...AGENTS] as [string, ...string[]]).optional(), json: z.boolean().optional() },
+  async ({ sources, json }: { sources?: typeof AGENTS[number] | 'all'; json?: boolean }) => {
     const selected = sources ?? 'all'
     const opts = selected === 'all' ? {} : { [selected]: true } as Record<string, boolean>
     const result = await syncAll(db, opts)
-    return text(JSON.stringify(result, null, 2))
+    if (json) return text(JSON.stringify(result, null, 2))
+    const lines = [
+      `sync: ${selected}`,
+      `deduped: ${result.deduped}`,
+      `cloud_pushed: ${result.cloudPushed ? 'yes' : 'no'}`,
+      `cloud_pulled: ${result.cloudPulled ? 'yes' : 'no'}`,
+    ]
+    for (const [source, value] of Object.entries(result)) {
+      if (['deduped', 'cloudPushed', 'cloudPulled'].includes(source)) continue
+      if (value == null) continue
+      lines.push(`${source}: ${compactObject(value)}`)
+    }
+    lines.push('Use json=true for the full sync result.')
+    return text(lines.join('\n'))
   },
 )
 
 server.tool(
   'get_usage',
-  'Usage snapshots and fleet summary. period: today|week|month|year|all',
-  { period: z.enum(['today', 'week', 'month', 'year', 'all']).optional(), agent: z.enum(AGENTS).optional() },
-  async ({ period, agent }: { period?: Exclude<Period, 'yesterday'>; agent?: Agent }) => {
+  'Usage snapshots and fleet summary. period: today|week|month|year|all, agent, limit(20). Set json=true for full data.',
+  { period: z.enum(['today', 'week', 'month', 'year', 'all']).optional(), agent: z.enum(AGENTS).optional(), limit: z.number().int().positive().max(100).optional(), json: z.boolean().optional() },
+  async ({ period, agent, limit, json }: { period?: Exclude<Period, 'yesterday'>; agent?: Agent; limit?: number; json?: boolean }) => {
     const p = (period ?? 'month') as Period
     const snaps = queryUsageSnapshots(db, { agent, ...usageSnapshotFilterForPeriod(p) })
     const summary = querySummary(db, p, undefined, true)
-    return text(JSON.stringify({ snapshots: snaps, summary }, null, 2))
+    if (json) return text(JSON.stringify({ snapshots: snaps, summary }, null, 2))
+    const rowLimit = clampLimit(limit)
+    const lines = [
+      `period: ${p}${agent ? `  agent: ${agent}` : ''}`,
+      `fleet: ${fmtUsd(summary.total_usd)}  sessions: ${summary.sessions}  requests: ${summary.requests.toLocaleString()}  tokens: ${fmtTok(summary.tokens)}`,
+      `snapshots: ${snaps.length}${snaps.length > rowLimit ? ` (showing ${rowLimit})` : ''}`,
+    ]
+    if (snaps.length > 0) {
+      lines.push('', 'date        agent      metric                      value        unit     machine')
+      for (const snapshot of snaps.slice(0, rowLimit)) {
+        lines.push(
+          `${snapshot.date.padEnd(12)}` +
+          `${snapshot.agent.slice(0, 10).padEnd(11)}` +
+          `${snapshot.metric.slice(0, 27).padEnd(28)}` +
+          `${compactPrimitive(snapshot.value).padEnd(13)}` +
+          `${(snapshot.unit ?? '').slice(0, 8).padEnd(9)}` +
+          `${snapshot.machine_id ?? '—'}`,
+        )
+      }
+      if (snaps.length > rowLimit) lines.push(`... ${snaps.length - rowLimit} more snapshots hidden; call with limit or json=true.`)
+    }
+    return text(lines.join('\n'))
   },
 )
 
 server.tool(
   'get_savings',
-  'Subscription vs API savings summary',
-  { period: z.enum(['today', 'week', 'month', 'year', 'all']).optional(), agent: z.enum(AGENTS).optional() },
-  async ({ period, agent }: { period?: Period; agent?: Agent }) => {
-    return text(JSON.stringify(querySavingsSummary(db, period ?? 'month', agent), null, 2))
+  'Subscription vs API savings summary. Params: period, agent, limit(20). Set json=true for full data.',
+  { period: z.enum(['today', 'week', 'month', 'year', 'all']).optional(), agent: z.enum(AGENTS).optional(), limit: z.number().int().positive().max(100).optional(), json: z.boolean().optional() },
+  async ({ period, agent, limit, json }: { period?: Period; agent?: Agent; limit?: number; json?: boolean }) => {
+    const savings = querySavingsSummary(db, period ?? 'month', agent)
+    if (json) return text(JSON.stringify(savings, null, 2))
+    const lines = [
+      `period: ${savings.period}${agent ? `  agent: ${agent}` : ''}`,
+      `api_equivalent: ${fmtUsd(savings.api_equivalent_usd)}`,
+      `subscription_fee: ${fmtUsd(savings.subscription_fee_usd)}`,
+      `included_consumed: ${fmtUsd(savings.included_consumed_usd)}`,
+      `on_demand: ${fmtUsd(savings.on_demand_usd)}`,
+      `saved: ${fmtUsd(savings.saved_usd)}`,
+    ]
+    const rows = Object.entries(savings.by_agent)
+    if (rows.length > 0) {
+      const rowLimit = clampLimit(limit)
+      lines.push('', `by_agent: ${rows.length}${rows.length > rowLimit ? ` (showing ${rowLimit})` : ''}`, 'agent      api_eq    sub_fee   included  on_demand saved')
+      for (const [agentName, row] of rows.slice(0, rowLimit)) {
+        lines.push(
+          `${agentName.slice(0, 10).padEnd(11)}` +
+          `${fmtUsd(Number(row.api_equivalent_usd ?? 0)).padEnd(10)}` +
+          `${fmtUsd(Number(row.subscription_fee_usd ?? 0)).padEnd(10)}` +
+          `${fmtUsd(Number(row.included_consumed_usd ?? 0)).padEnd(10)}` +
+          `${fmtUsd(Number(row.on_demand_usd ?? 0)).padEnd(10)}` +
+          `${fmtUsd(Number(row.saved_usd ?? 0))}`,
+        )
+      }
+      if (rows.length > rowLimit) lines.push(`... ${rows.length - rowLimit} more agents hidden; call with limit or json=true.`)
+    }
+    return text(lines.join('\n'))
   },
 )
 
@@ -540,8 +668,9 @@ server.tool(
     billing_cycle_start: z.string().optional(),
     reset_policy: z.string().optional(),
     active: z.boolean().optional(),
+    json: z.boolean().optional(),
   },
-  async (input: { id?: string; provider: string; plan: string; agent?: Agent; monthly_fee_usd?: number; included_usage_usd?: number; billing_cycle_start?: string; reset_policy?: string; active?: boolean }) => {
+  async (input: { id?: string; provider: string; plan: string; agent?: Agent; monthly_fee_usd?: number; included_usage_usd?: number; billing_cycle_start?: string; reset_policy?: string; active?: boolean; json?: boolean }) => {
     const now = new Date().toISOString()
     const row = {
       id: input.id ?? randomUUID(),
@@ -557,7 +686,8 @@ server.tool(
       updated_at: now,
     }
     upsertSubscription(db, row)
-    return text(JSON.stringify(row, null, 2))
+    if (input.json) return text(JSON.stringify(row, null, 2))
+    return text(`Subscription set: ${row.id}\nprovider: ${row.provider}\nplan: ${row.plan}\nagent: ${row.agent ?? 'all'}\nfee: ${fmtUsd(row.monthly_fee_usd)}\nincluded: ${fmtUsd(row.included_usage_usd)}`)
   },
 )
 
@@ -583,19 +713,23 @@ server.tool(
 
 server.tool(
   'get_goals',
-  'All spending goals with current progress. No params.',
-  {},
-  async () => {
+  'All spending goals with current progress. Params: limit(20), verbose, json.',
+  { limit: z.number().int().positive().max(100).optional(), verbose: z.boolean().optional(), json: z.boolean().optional() },
+  async ({ limit, verbose, json }: { limit?: number; verbose?: boolean; json?: boolean }) => {
     const goals = getGoalStatuses(db) as unknown as Array<Record<string, unknown>>
+    if (json) return text(JSON.stringify(goals, null, 2))
     if (goals.length === 0) return text('No goals set.')
+    const visibleGoals = goals.slice(0, rowLimit(limit, verbose))
 
     const lines = ['period   scope                limit      spent      used%  status']
-    for (const goal of goals) {
+    for (const goal of visibleGoals) {
       const scope = String(goal['project_path'] ?? goal['agent'] ?? 'global').slice(0, 20)
       const pct = Number(goal['percent_used']).toFixed(1)
       const status = goal['is_over'] ? 'OVER' : goal['is_at_risk'] ? 'AT RISK' : 'ON TRACK'
       lines.push(`${String(goal['period']).padEnd(9)}${scope.padEnd(21)}${fmtUsd(Number(goal['limit_usd'])).padEnd(11)}${fmtUsd(Number(goal['current_spend_usd'])).padEnd(11)}${pct}%  ${status}`)
     }
+    const hint = hiddenRowsHint(goals.length, visibleGoals.length, 'goals')
+    if (hint) lines.push(hint)
     return text(lines.join('\n'))
   },
 )
@@ -636,15 +770,19 @@ server.tool(
 
 server.tool(
   'list_machines',
-  'List all machines that have synced data. No params.',
-  {},
-  async () => {
+  'List all machines that have synced data. Params: limit(20), verbose, json.',
+  { limit: z.number().int().positive().max(100).optional(), verbose: z.boolean().optional(), json: z.boolean().optional() },
+  async ({ limit, verbose, json }: { limit?: number; verbose?: boolean; json?: boolean }) => {
     const machines = listMachines(db)
+    if (json) return text(JSON.stringify(machines, null, 2))
     if (machines.length === 0) return text(`No machine data yet. Current machine: ${getMachineId()}`)
+    const visibleMachines = machines.slice(0, rowLimit(limit, verbose))
     const lines = ['machine          sessions  requests  cost        last_active']
-    for (const m of machines) {
+    for (const m of visibleMachines) {
       lines.push(`${m.machine_id.padEnd(17)}${String(m.sessions).padEnd(10)}${String(m.requests).padEnd(10)}${fmtUsd(m.total_cost_usd).padEnd(12)}${m.last_active?.substring(0, 16) ?? '—'}`)
     }
+    const hint = hiddenRowsHint(machines.length, visibleMachines.length, 'machines')
+    if (hint) lines.push(hint)
     lines.push(`\ncurrent machine: ${getMachineId()}`)
     return text(lines.join('\n'))
   },
@@ -653,18 +791,20 @@ server.tool(
 server.tool(
   'register_agent',
   'Register agent session.',
-  { name: z.string(), session_id: z.string().optional() },
-  async ({ name }: { name: string; session_id?: string }) => {
+  { name: z.string(), session_id: z.string().optional(), json: z.boolean().optional() },
+  async ({ name, json }: { name: string; session_id?: string; json?: boolean }) => {
     const existing = [..._econAgents.values()].find((agent) => agent.name === name)
     if (existing) {
       existing.last_seen_at = new Date().toISOString()
-      return text(JSON.stringify(existing))
+      if (json) return text(JSON.stringify(existing))
+      return text(fmtAgentRegistration(existing))
     }
 
     const id = Math.random().toString(36).slice(2, 10)
     const agent = { id, name, last_seen_at: new Date().toISOString() }
     _econAgents.set(id, agent)
-    return text(JSON.stringify(agent))
+    if (json) return text(JSON.stringify(agent))
+    return text(fmtAgentRegistration(agent))
   },
 )
 
@@ -695,8 +835,22 @@ server.tool(
 server.tool(
   'list_agents',
   'List all registered agents.',
-  {},
-  async () => text(JSON.stringify([..._econAgents.values()])),
+  { json: z.boolean().optional() },
+  async ({ json }: { json?: boolean }) => {
+    const agents = [..._econAgents.values()]
+    if (json) return text(JSON.stringify(agents))
+    if (agents.length === 0) return text('No agents registered.')
+    const lines = ['id        name                 last_seen_at          project']
+    for (const agent of agents) {
+      lines.push(
+        `${agent.id.padEnd(10)}` +
+        `${agent.name.slice(0, 20).padEnd(21)}` +
+        `${agent.last_seen_at.slice(0, 19).padEnd(22)}` +
+        `${agent.project_id ?? '—'}`,
+      )
+    }
+    return text(lines.join('\n'))
+  },
 )
 
 server.tool(
